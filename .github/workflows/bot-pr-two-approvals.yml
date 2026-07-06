@@ -1,0 +1,107 @@
+# .github/workflows/bot-pr-two-approvals.yml
+#
+# Vynucuje 2 lidská schválení u PR, jejichž autorem je bot.
+# Schvalovatel se nepočítá, pokud je autorem/committerem jakéhokoli commitu v PR.
+# Výsledek publikuje jako commit status "bot-pr/two-human-approvals",
+# který je v branch protection nastaven jako REQUIRED.
+#
+# Bezpečnostní poznámky:
+# - pull_request_target => workflow běží z base větve, útočník ho nemůže
+#   změnit v rámci útočného PR.
+# - NIKDY zde nedělat checkout PR kódu (actions/checkout s PR ref) ani
+#   spouštět nic z PR. Používáme výhradně GitHub API.
+# - Soubor chránit přes CODEOWNERS (.github/** -> security tým).
+
+name: bot-pr-two-approvals
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+
+permissions:
+  pull-requests: read
+  statuses: write
+
+concurrency:
+  group: bot-approvals-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate approvals
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const REQUIRED_HUMAN_APPROVALS = 2;
+            const STATUS_CONTEXT = 'bot-pr/two-human-approvals';
+
+            const pr = context.payload.pull_request;
+            const { owner, repo } = context.repo;
+            const headSha = pr.head.sha;
+
+            const setStatus = (state, description) =>
+              github.rest.repos.createCommitStatus({
+                owner, repo, sha: headSha, state,
+                context: STATUS_CONTEXT,
+                description: description.slice(0, 140),
+              });
+
+            // 1) Je autor PR bot?
+            const isBot =
+              pr.user.type === 'Bot' || pr.user.login.endsWith('[bot]');
+
+            if (!isBot) {
+              // Lidská PR řeší nativní branch protection (1 approval).
+              await setStatus('success', 'PR není od bota – platí standardní pravidla.');
+              return;
+            }
+
+            // 2) Kdo do PR přispěl commitem? (author i committer)
+            const commits = await github.paginate(github.rest.pulls.listCommits, {
+              owner, repo, pull_number: pr.number, per_page: 100,
+            });
+
+            const contributors = new Set();
+            for (const c of commits) {
+              if (c.author?.login) contributors.add(c.author.login.toLowerCase());
+              // web-flow = GitHub UI merge/edit committer, ignorujeme
+              if (c.committer?.login && c.committer.login !== 'web-flow') {
+                contributors.add(c.committer.login.toLowerCase());
+              }
+            }
+
+            // 3) Poslední review od každého uživatele
+            const reviews = await github.paginate(github.rest.pulls.listReviews, {
+              owner, repo, pull_number: pr.number, per_page: 100,
+            });
+
+            const latestByUser = new Map();
+            for (const r of reviews) {
+              if (!r.user || r.user.type === 'Bot') continue;
+              if (r.state === 'COMMENTED') continue; // komentář nemění stav approvalu
+              latestByUser.set(r.user.login.toLowerCase(), r);
+            }
+
+            // 4) Platné approvals: stav APPROVED, na aktuálním head SHA,
+            //    od někoho, kdo do PR nepřispěl commitem.
+            const validApprovers = [];
+            for (const [login, r] of latestByUser) {
+              if (r.state !== 'APPROVED') continue;
+              if (r.commit_id !== headSha) continue;   // approval starší verze neplatí
+              if (contributors.has(login)) continue;   // committer si neschvaluje
+              validApprovers.push(login);
+            }
+
+            const ok = validApprovers.length >= REQUIRED_HUMAN_APPROVALS;
+            core.info(`Bot PR #${pr.number}: valid approvals = ${validApprovers.join(', ') || 'none'}`);
+
+            await setStatus(
+              ok ? 'success' : 'pending',
+              ok
+                ? `OK: ${validApprovers.length} nezávislá lidská schválení.`
+                : `Bot PR: potřeba ${REQUIRED_HUMAN_APPROVALS} schválení od ne-committerů (má ${validApprovers.length}).`
+            );
