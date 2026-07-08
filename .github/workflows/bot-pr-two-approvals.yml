@@ -1,7 +1,11 @@
 # .github/workflows/bot-pr-two-approvals.yml
 #
 # Vynucuje 2 lidská schválení u PR, jejichž autorem je bot.
-# Schvalovatel se nepočítá, pokud je autorem/committerem jakéhokoli commitu v PR.
+# Schvalovatel se nepočítá, pokud je autorem/committerem jakéhokoli commitu v PR,
+# nebo pokud nemá write/admin přístup k repu (ochrana proti sockpuppet účtům
+# na veřejném repu – review může odeslat kdokoli).
+# Bot PR s commitem bez ověřeného podpisu je rovnou failure: nepodepsaný commit
+# může mít podvržený author e-mail a obejít tak detekci committerů.
 # Výsledek publikuje jako commit status "bot-pr/two-human-approvals",
 # který je v branch protection nastaven jako REQUIRED.
 #
@@ -90,6 +94,18 @@ jobs:
               }
             }
 
+            // 2b) Všechny commity musí mít ověřený podpis. Nepodepsaný commit
+            //     může mít podvržený author e-mail, a tím obejít detekci
+            //     committerů (schvalovatel by si schválil vlastní commit).
+            const unverified = commits.filter(c => !c.commit?.verification?.verified);
+            if (unverified.length > 0) {
+              await setStatus(
+                'failure',
+                `Bot PR: ${unverified.length} commit(ů) bez ověřeného podpisu – autory nelze spolehlivě určit.`
+              );
+              return;
+            }
+
             // 3) Poslední review od každého uživatele
             const reviews = await github.paginate(github.rest.pulls.listReviews, {
               owner, repo, pull_number: pr.number, per_page: 100,
@@ -103,12 +119,28 @@ jobs:
             }
 
             // 4) Platné approvals: stav APPROVED, na aktuálním head SHA,
-            //    od někoho, kdo do PR nepřispěl commitem.
+            //    od někoho, kdo do PR nepřispěl commitem a má write/admin
+            //    přístup. Bez kontroly oprávnění by na veřejném repu stačily
+            //    dva jednorázové účty – review může odeslat kdokoli.
+            //    (Legacy pole `permission` mapuje maintain->write, triage->read,
+            //    takže test na admin/write pokrývá i maintain.)
+            const hasWriteAccess = async (username) => {
+              try {
+                const { data } = await github.rest.repos.getCollaboratorPermissionLevel({
+                  owner, repo, username,
+                });
+                return data.permission === 'admin' || data.permission === 'write';
+              } catch {
+                return false; // 404 => není kolaborátor
+              }
+            };
+
             const validApprovers = [];
             for (const [login, r] of latestByUser) {
               if (r.state !== 'APPROVED') continue;
               if (r.commit_id !== headSha) continue;   // approval starší verze neplatí
               if (contributors.has(login)) continue;   // committer si neschvaluje
+              if (!(await hasWriteAccess(r.user.login))) continue;
               validApprovers.push(login);
             }
 
@@ -119,5 +151,5 @@ jobs:
               ok ? 'success' : 'pending',
               ok
                 ? `OK: ${validApprovers.length} nezávislá lidská schválení.`
-                : `Bot PR: potřeba ${REQUIRED_HUMAN_APPROVALS} schválení od ne-committerů (má ${validApprovers.length}).`
+                : `Bot PR: potřeba ${REQUIRED_HUMAN_APPROVALS} schválení od ne-committerů s write přístupem (má ${validApprovers.length}).`
             );
