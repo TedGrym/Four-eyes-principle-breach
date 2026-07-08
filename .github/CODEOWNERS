@@ -1,0 +1,7 @@
+# Changes to workflows, CODEOWNERS and other repo automation must be
+# reviewed by the security owners. Combined with the branch protection
+# setting "Require review from Code Owners", this prevents a bot PR from
+# silently modifying bot-pr-two-approvals.yml (the pull_request_review
+# trigger executes the workflow version from the PR merge commit, so an
+# unreviewed workflow change could fake the required status).
+/.github/ @TedGrym

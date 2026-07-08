@@ -10,7 +10,14 @@
 #   změnit v rámci útočného PR.
 # - NIKDY zde nedělat checkout PR kódu (actions/checkout s PR ref) ani
 #   spouštět nic z PR. Používáme výhradně GitHub API.
-# - Soubor chránit přes CODEOWNERS (.github/** -> security tým).
+# - Soubor chránit přes CODEOWNERS (.github/** -> security tým) a v branch
+#   protection zapnout "Require review from Code Owners". Trigger
+#   pull_request_review totiž (na rozdíl od pull_request_target) spouští
+#   verzi workflow z merge commitu PR, takže neschválená změna tohoto
+#   souboru by mohla podvrhnout výsledný status.
+# - Bot PRy z forků nepodporujeme: run na pull_request_review by u nich měl
+#   read-only token a zápis statusu by selhal. Dependabot i GitHub Apps
+#   pushují do větví v tomto repu, takže to nevadí.
 
 name: bot-pr-two-approvals
 
@@ -39,6 +46,13 @@ jobs:
             const REQUIRED_HUMAN_APPROVALS = 2;
             const STATUS_CONTEXT = 'bot-pr/two-human-approvals';
 
+            // Machine-user účty (běžné uživatelské účty používané jako boti,
+            // např. CI účet s PAT), které mají podléhat stejným pravidlům
+            // jako GitHub Apps. Loginy uvádět malými písmeny.
+            const MACHINE_USER_BOTS = new Set([
+              // 'ci-bot-example',
+            ]);
+
             const pr = context.payload.pull_request;
             const { owner, repo } = context.repo;
             const headSha = pr.head.sha;
@@ -52,7 +66,9 @@ jobs:
 
             // 1) Je autor PR bot?
             const isBot =
-              pr.user.type === 'Bot' || pr.user.login.endsWith('[bot]');
+              pr.user.type === 'Bot' ||
+              pr.user.login.endsWith('[bot]') ||
+              MACHINE_USER_BOTS.has(pr.user.login.toLowerCase());
 
             if (!isBot) {
               // Lidská PR řeší nativní branch protection (1 approval).
