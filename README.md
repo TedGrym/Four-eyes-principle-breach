@@ -11,7 +11,8 @@ With classic branch protection, a PR opened by a bot (Dependabot, an AI agent, a
 The workflow [`.github/workflows/bot-pr-two-approvals.yml`](.github/workflows/bot-pr-two-approvals.yml) publishes a commit status `bot-pr/two-human-approvals`:
 
 - **Human-authored PR** → status is `success` immediately; native branch protection rules apply as usual.
-- **Bot-authored PR** → status stays `pending` until **2 humans** approve the current head commit, where neither approver authored or committed any commit in the PR.
+- **Bot-authored PR** → status stays `pending` until **2 humans with write access** approve the current head commit, where neither approver authored or committed any commit in the PR. Approvals from accounts without write/admin permission are ignored (anyone can submit a review on a public repo — this blocks sockpuppet accounts).
+- **Bot-authored PR with an unverified commit** → status is `failure`: an unsigned commit can spoof its author email and defeat the contributor detection, so such PRs are rejected outright.
 
 The status is marked as **required** in branch protection, so bot PRs cannot merge without two independent human reviews.
 
@@ -24,7 +25,7 @@ The workflow is only half of the mechanism — without these settings the demo d
 3. **Dismiss stale pull request approvals when new commits are pushed.**
 4. **Require review from Code Owners** — together with [`.github/CODEOWNERS`](.github/CODEOWNERS) this guards the workflow file itself: the `pull_request_review` trigger runs the workflow version from the PR merge commit, so an unreviewed workflow edit could otherwise fake the required status.
 5. **Do not allow bypassing the above settings** (include administrators).
-6. Recommended: **Require signed commits** — the contributor detection maps commit author emails to GitHub accounts, and unsigned commits with spoofed emails could otherwise let a contributor approve their own commit.
+6. Recommended: **Require signed commits** — the workflow already fails bot PRs containing unverified commits, but the branch protection setting extends the same guarantee to human PRs as defense in depth.
 
 ## Test checklist
 
@@ -36,6 +37,8 @@ The workflow is only half of the mechanism — without these settings the demo d
 | 4 | New commit pushed to the PR | back to `pending` (stale approvals don't count) |
 | 5 | A human who pushed a commit to the PR approves | their approval is **not** counted |
 | 6 | Human opens a PR | `success` immediately, standard rules apply |
+| 7 | A user **without write access** approves | their approval is **not** counted |
+| 8 | Bot PR contains an unverified (unsigned) commit | `failure` |
 
 The intentionally outdated `lodash` pin in [`package.json`](package.json) plus [`.github/dependabot.yml`](.github/dependabot.yml) generate real bot PRs to test with; [`src/index.js`](src/index.js) gives bot PRs actual code to modify.
 
@@ -43,4 +46,4 @@ The intentionally outdated `lodash` pin in [`package.json`](package.json) plus [
 
 - Bot PRs **from forks** are not supported: on `pull_request_review` events the run would get a read-only token and fail to write the status. Dependabot and GitHub Apps push branches to this repo, so this does not affect them.
 - Machine-user accounts (regular accounts used as bots) are not auto-detected — add their logins to `MACHINE_USER_BOTS` in the workflow.
-- Any workflow in this repo running with `statuses: write` could set the same status context; for maximum robustness publish the status from a GitHub App with its own token instead of `GITHUB_TOKEN`.
+- Any workflow in this repo running with `statuses: write` could set the same status context; for maximum robustness publish the status from a GitHub App with its own token instead of `GITHUB_TOKEN`. That would also solve the fork-PR limitation above, making the setup suitable for fully open-source repos.
