@@ -5,3 +5,4 @@
 # trigger executes the workflow version from the PR merge commit, so an
 # unreviewed workflow change could fake the required status).
 /.github/ @TedGrym
+/.github/ @W4jzy
