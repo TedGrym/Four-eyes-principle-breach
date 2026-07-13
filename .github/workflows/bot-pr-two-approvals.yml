@@ -110,7 +110,20 @@ jobs:
                   "context": STATUS_CONTEXT,
                   "description": description[:140],
               })
-              r.raise_for_status()
+              # U fork PRů (a pull_request_review runů s read-only tokenem)
+              # vrátí zápis statusu 403/404. To je očekávané a nefatální:
+              # status zůstane pending => PR nejde mergnout (fail-closed),
+              # job kvůli tomu nemá spadnout. Ostatní chyby necháme vybublat.
+              if r.status_code in (403, 404):
+                  print(f"Info: nelze zapsat status {STATUS_CONTEXT} pro {head_sha} "
+                        f"(HTTP {r.status_code}) – read-only token / cross-repo "
+                        "event; pokračuji, status zůstává fail-closed.")
+                  return
+              try:
+                  r.raise_for_status()
+              except requests.exceptions.HTTPError:
+                  print("Error setting status:", r.status_code, r.text)
+                  raise
 
           # Legacy pole `permission` mapuje maintain->write a triage->read,
           # takže test na admin/write pokrývá i maintain. Chyba/404 => False,
