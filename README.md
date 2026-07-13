@@ -10,9 +10,11 @@ With classic branch protection, a PR opened by a bot (Dependabot, an AI agent, a
 
 The workflow [`.github/workflows/bot-pr-two-approvals.yml`](.github/workflows/bot-pr-two-approvals.yml) publishes a commit status `bot-pr/two-human-approvals`:
 
-- **Human-authored PR** → status is `success` immediately; native branch protection rules apply as usual.
-- **Bot-authored PR** → status stays `pending` until **2 humans with write access** approve the current head commit, where neither approver authored or committed any commit in the PR. Approvals from accounts without write/admin permission are ignored (anyone can submit a review on a public repo — this blocks sockpuppet accounts).
-- **Bot-authored PR with an unverified commit** → status is `failure`: an unsigned commit can spoof its author email and defeat the contributor detection, so such PRs are rejected outright.
+- **PR authored by a human with write access** → status is `success` immediately; native branch protection rules apply as usual.
+- **PR from an untrusted author** — a bot, a machine-user account, or **any human account without write/admin access** → status stays `pending` until **2 humans with write access** approve the current head commit, where neither approver authored or committed any commit in the PR. Approvals from accounts without write/admin permission are ignored.
+- **Untrusted-author PR with an unverified commit** → status is `failure`: an unsigned commit can spoof its author email and defeat the contributor detection, so such PRs are rejected outright.
+
+Treating write-less humans the same as bots closes the **sockpuppet attack**: a collaborator creates a throwaway account, pushes a commit from it via a fork PR, then approves the PR from their main account. The author isn't a bot, so a bot-only check would wave the PR through with that single self-serving approval. Here the throwaway author is untrusted, so the PR needs 2 approvals from write-access non-committers — the attacker's own approval counts as at most 1 of them, forcing a genuine independent review.
 
 The status is marked as **required** in branch protection, so bot PRs cannot merge without two independent human reviews.
 
@@ -36,14 +38,16 @@ The workflow is only half of the mechanism — without these settings the demo d
 | 3 | Second human approves | `success` |
 | 4 | New commit pushed to the PR | back to `pending` (stale approvals don't count) |
 | 5 | A human who pushed a commit to the PR approves | their approval is **not** counted |
-| 6 | Human opens a PR | `success` immediately, standard rules apply |
+| 6 | Human **with write access** opens a PR | `success` immediately, standard rules apply |
 | 7 | A user **without write access** approves | their approval is **not** counted |
-| 8 | Bot PR contains an unverified (unsigned) commit | `failure` |
+| 8 | Untrusted-author PR contains an unverified (unsigned) commit | `failure` |
+| 9 | Human **without write access** opens a PR (fork / sockpuppet) | `pending`, same rules as a bot PR |
+| 10 | Sockpuppet PR approved from its owner's main account | still `pending` — that approval is only 1 of the required 2 |
 
 The intentionally outdated `lodash` pin in [`package.json`](package.json) plus [`.github/dependabot.yml`](.github/dependabot.yml) generate real bot PRs to test with — authored by `dependabot[bot]` with signed commits, they exercise the full bot path of the workflow. The workflow itself is content-agnostic (it only looks at the PR author, committers and reviews), so no demo source code is needed.
 
 ## Known limitations
 
-- Bot PRs **from forks** are not supported: on `pull_request_review` events the run would get a read-only token and fail to write the status. Dependabot and GitHub Apps push branches to this repo, so this does not affect them.
+- On PRs **from forks**, `pull_request_review` runs get a read-only token and cannot update the status. This fails closed — the status stays `pending` and the PR cannot merge — but it also means approvals on fork PRs only take effect on the next `pull_request_target` event: a push, reopen, ready-for-review, or adding a label (the `labeled` trigger exists exactly for this manual nudge).
 - Machine-user accounts (regular accounts used as bots) are not auto-detected — add their logins to `MACHINE_USER_BOTS` in the workflow.
 - Any workflow in this repo running with `statuses: write` could set the same status context; for maximum robustness publish the status from a GitHub App with its own token instead of `GITHUB_TOKEN`. That would also solve the fork-PR limitation above, making the setup suitable for fully open-source repos.

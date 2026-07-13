@@ -1,11 +1,19 @@
 # .github/workflows/bot-pr-two-approvals.yml
 #
-# Vynucuje 2 lidská schválení u PR, jejichž autorem je bot.
-# Schvalovatel se nepočítá, pokud je autorem/committerem jakéhokoli commitu v PR,
-# nebo pokud nemá write/admin přístup k repu (ochrana proti sockpuppet účtům
-# na veřejném repu – review může odeslat kdokoli).
-# Bot PR s commitem bez ověřeného podpisu je rovnou failure: nepodepsaný commit
-# může mít podvržený author e-mail a obejít tak detekci committerů.
+# Vynucuje 2 lidská schválení u PR od nedůvěryhodného autora. Nedůvěryhodný
+# autor = bot, machine-user účet, nebo lidský účet bez write/admin přístupu.
+#
+# Lidé bez write přístupu spadají do stejného režimu jako boti kvůli
+# sockpuppet útoku: útočník s write přístupem si založí dummy účet, přes
+# fork pošle PR s vlastním commitem a ze svého hlavního účtu si ho sám
+# schválí. Autor PR není bot, takže by detekce jen podle typu účtu
+# neselhala a jediný approval by stačil nativní branch protection.
+#
+# Schvalovatel se nepočítá, pokud je autorem/committerem jakéhokoli commitu
+# v PR, nebo pokud nemá write/admin přístup k repu.
+# PR od nedůvěryhodného autora s commitem bez ověřeného podpisu je rovnou
+# failure: nepodepsaný commit může mít podvržený author e-mail a obejít tak
+# detekci committerů.
 # Výsledek publikuje jako commit status "bot-pr/two-human-approvals",
 # který je v branch protection nastaven jako REQUIRED.
 #
@@ -19,15 +27,17 @@
 #   pull_request_review totiž (na rozdíl od pull_request_target) spouští
 #   verzi workflow z merge commitu PR, takže neschválená změna tohoto
 #   souboru by mohla podvrhnout výsledný status.
-# - Bot PRy z forků nepodporujeme: run na pull_request_review by u nich měl
-#   read-only token a zápis statusu by selhal. Dependabot i GitHub Apps
-#   pushují do větví v tomto repu, takže to nevadí.
+# - U PRů z forků má run na pull_request_review read-only token a zápis
+#   statusu selže. Bezpečnostně to nevadí (status zůstane pending, PR nejde
+#   mergnout = fail-closed), ale approvals se u fork PRů promítnou až při
+#   dalším pull_request_target eventu – push, reopen, ready_for_review,
+#   nebo přidání labelu (proto je v types i "labeled").
 
 name: bot-pr-two-approvals
 
 on:
   pull_request_target:
-    types: [opened, reopened, synchronize, ready_for_review]
+    types: [opened, reopened, synchronize, ready_for_review, labeled]
   pull_request_review:
     types: [submitted, edited, dismissed]
 
@@ -102,17 +112,32 @@ jobs:
               })
               r.raise_for_status()
 
-          # 1) Je autor PR bot?
+          # Legacy pole `permission` mapuje maintain->write a triage->read,
+          # takže test na admin/write pokrývá i maintain. Chyba/404 => False,
+          # tj. mechanismus selhává bezpečným směrem.
+          def has_write_access(username):
+              r = session.get(f"{API}/repos/{REPO}/collaborators/{username}/permission")
+              if r.status_code != 200:
+                  return False  # 404 => není kolaborátor
+              return r.json()["permission"] in ("admin", "write")
+
+          # 1) Je autor PR důvěryhodný? Důvěryhodný = lidský účet s write/admin
+          #    přístupem. Boti, machine-user účty i lidé bez write přístupu
+          #    (sockpuppet / fork PR) musí projít režimem 2 schválení – jinak
+          #    by si útočník s write přístupem poslal commit z dummy účtu
+          #    a z hlavního účtu si ho sám schválil.
           author = pr["user"]
-          is_bot = (
-              author["type"] == "Bot"
-              or author["login"].endswith("[bot]")
-              or author["login"].lower() in MACHINE_USER_BOTS
+          author_is_trusted = (
+              author["type"] == "User"
+              and not author["login"].endswith("[bot]")
+              and author["login"].lower() not in MACHINE_USER_BOTS
+              and has_write_access(author["login"])
           )
 
-          if not is_bot:
-              # Lidská PR řeší nativní branch protection (1 approval).
-              set_status("success", "PR není od bota – platí standardní pravidla.")
+          if author_is_trusted:
+              # PR od kolaborátora s write přístupem řeší nativní branch
+              # protection (1 nezávislý approval).
+              set_status("success", "Autor PR má write přístup – platí standardní pravidla.")
               sys.exit(0)
 
           # 2) Kdo do PR přispěl commitem? (author i committer)
@@ -135,8 +160,8 @@ jobs:
           if unverified:
               set_status(
                   "failure",
-                  f"Bot PR: {len(unverified)} commit(ů) bez ověřeného podpisu "
-                  "– autory nelze spolehlivě určit.",
+                  f"PR od nedůvěryhodného autora: {len(unverified)} commit(ů) "
+                  "bez ověřeného podpisu – autory nelze spolehlivě určit.",
               )
               sys.exit(0)
 
@@ -154,14 +179,6 @@ jobs:
           #    od někoho, kdo do PR nepřispěl commitem a má write/admin
           #    přístup. Bez kontroly oprávnění by na veřejném repu stačily
           #    dva jednorázové účty – review může odeslat kdokoli.
-          #    (Legacy pole `permission` mapuje maintain->write, triage->read,
-          #    takže test na admin/write pokrývá i maintain.)
-          def has_write_access(username):
-              r = session.get(f"{API}/repos/{REPO}/collaborators/{username}/permission")
-              if r.status_code != 200:
-                  return False  # 404 => není kolaborátor
-              return r.json()["permission"] in ("admin", "write")
-
           valid_approvers = [
               login
               for login, review in latest_by_user.items()
@@ -172,12 +189,12 @@ jobs:
           ]
 
           ok = len(valid_approvers) >= REQUIRED_HUMAN_APPROVALS
-          print(f"Bot PR #{pr['number']}: valid approvals = {', '.join(valid_approvers) or 'none'}")
+          print(f"Untrusted PR #{pr['number']}: valid approvals = {', '.join(valid_approvers) or 'none'}")
 
           set_status(
               "success" if ok else "pending",
               f"OK: {len(valid_approvers)} nezávislá lidská schválení."
               if ok else
-              f"Bot PR: potřeba {REQUIRED_HUMAN_APPROVALS} schválení od "
-              f"ne-committerů s write přístupem (má {len(valid_approvers)}).",
+              f"PR od nedůvěryhodného autora: potřeba {REQUIRED_HUMAN_APPROVALS} "
+              f"schválení od ne-committerů s write přístupem (má {len(valid_approvers)}).",
           )
