@@ -43,113 +43,141 @@ jobs:
   evaluate:
     runs-on: ubuntu-latest
     steps:
+      - name: Install dependencies
+        run: python3 -m pip install --quiet requests
+
       - name: Evaluate approvals
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const REQUIRED_HUMAN_APPROVALS = 2;
-            const STATUS_CONTEXT = 'bot-pr/two-human-approvals';
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: python
+        run: |
+          import json
+          import os
+          import sys
 
-            // Machine-user účty (běžné uživatelské účty používané jako boti,
-            // např. CI účet s PAT), které mají podléhat stejným pravidlům
-            // jako GitHub Apps. Loginy uvádět malými písmeny.
-            const MACHINE_USER_BOTS = new Set([
-              // 'ci-bot-example',
-            ]);
+          import requests
 
-            const pr = context.payload.pull_request;
-            const { owner, repo } = context.repo;
-            const headSha = pr.head.sha;
+          REQUIRED_HUMAN_APPROVALS = 2
+          STATUS_CONTEXT = "bot-pr/two-human-approvals"
 
-            const setStatus = (state, description) =>
-              github.rest.repos.createCommitStatus({
-                owner, repo, sha: headSha, state,
-                context: STATUS_CONTEXT,
-                description: description.slice(0, 140),
-              });
+          # Machine-user účty (běžné uživatelské účty používané jako boti,
+          # např. CI účet s PAT), které mají podléhat stejným pravidlům
+          # jako GitHub Apps. Loginy uvádět malými písmeny.
+          MACHINE_USER_BOTS = {
+              # "ci-bot-example",
+          }
 
-            // 1) Je autor PR bot?
-            const isBot =
-              pr.user.type === 'Bot' ||
-              pr.user.login.endsWith('[bot]') ||
-              MACHINE_USER_BOTS.has(pr.user.login.toLowerCase());
+          API = os.environ["GITHUB_API_URL"]
+          REPO = os.environ["GITHUB_REPOSITORY"]
 
-            if (!isBot) {
-              // Lidská PR řeší nativní branch protection (1 approval).
-              await setStatus('success', 'PR není od bota – platí standardní pravidla.');
-              return;
-            }
+          session = requests.Session()
+          session.headers.update({
+              "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+              "Accept": "application/vnd.github+json",
+          })
 
-            // 2) Kdo do PR přispěl commitem? (author i committer)
-            const commits = await github.paginate(github.rest.pulls.listCommits, {
-              owner, repo, pull_number: pr.number, per_page: 100,
-            });
+          def get_all_pages(path):
+              """Stáhne všechny položky ze stránkovaného list endpointu."""
+              items, page = [], 1
+              while True:
+                  r = session.get(f"{API}/repos/{REPO}{path}",
+                                  params={"per_page": 100, "page": page})
+                  r.raise_for_status()
+                  batch = r.json()
+                  items += batch
+                  if len(batch) < 100:
+                      return items
+                  page += 1
 
-            const contributors = new Set();
-            for (const c of commits) {
-              if (c.author?.login) contributors.add(c.author.login.toLowerCase());
-              // web-flow = GitHub UI merge/edit committer, ignorujeme
-              if (c.committer?.login && c.committer.login !== 'web-flow') {
-                contributors.add(c.committer.login.toLowerCase());
-              }
-            }
+          with open(os.environ["GITHUB_EVENT_PATH"]) as f:
+              pr = json.load(f)["pull_request"]
 
-            // 2b) Všechny commity musí mít ověřený podpis. Nepodepsaný commit
-            //     může mít podvržený author e-mail, a tím obejít detekci
-            //     committerů (schvalovatel by si schválil vlastní commit).
-            const unverified = commits.filter(c => !c.commit?.verification?.verified);
-            if (unverified.length > 0) {
-              await setStatus(
-                'failure',
-                `Bot PR: ${unverified.length} commit(ů) bez ověřeného podpisu – autory nelze spolehlivě určit.`
-              );
-              return;
-            }
+          head_sha = pr["head"]["sha"]
 
-            // 3) Poslední review od každého uživatele
-            const reviews = await github.paginate(github.rest.pulls.listReviews, {
-              owner, repo, pull_number: pr.number, per_page: 100,
-            });
+          def set_status(state, description):
+              r = session.post(f"{API}/repos/{REPO}/statuses/{head_sha}", json={
+                  "state": state,
+                  "context": STATUS_CONTEXT,
+                  "description": description[:140],
+              })
+              r.raise_for_status()
 
-            const latestByUser = new Map();
-            for (const r of reviews) {
-              if (!r.user || r.user.type === 'Bot') continue;
-              if (r.state === 'COMMENTED') continue; // komentář nemění stav approvalu
-              latestByUser.set(r.user.login.toLowerCase(), r);
-            }
+          # 1) Je autor PR bot?
+          author = pr["user"]
+          is_bot = (
+              author["type"] == "Bot"
+              or author["login"].endswith("[bot]")
+              or author["login"].lower() in MACHINE_USER_BOTS
+          )
 
-            // 4) Platné approvals: stav APPROVED, na aktuálním head SHA,
-            //    od někoho, kdo do PR nepřispěl commitem a má write/admin
-            //    přístup. Bez kontroly oprávnění by na veřejném repu stačily
-            //    dva jednorázové účty – review může odeslat kdokoli.
-            //    (Legacy pole `permission` mapuje maintain->write, triage->read,
-            //    takže test na admin/write pokrývá i maintain.)
-            const hasWriteAccess = async (username) => {
-              try {
-                const { data } = await github.rest.repos.getCollaboratorPermissionLevel({
-                  owner, repo, username,
-                });
-                return data.permission === 'admin' || data.permission === 'write';
-              } catch {
-                return false; // 404 => není kolaborátor
-              }
-            };
+          if not is_bot:
+              # Lidská PR řeší nativní branch protection (1 approval).
+              set_status("success", "PR není od bota – platí standardní pravidla.")
+              sys.exit(0)
 
-            const validApprovers = [];
-            for (const [login, r] of latestByUser) {
-              if (r.state !== 'APPROVED') continue;
-              if (r.commit_id !== headSha) continue;   // approval starší verze neplatí
-              if (contributors.has(login)) continue;   // committer si neschvaluje
-              if (!(await hasWriteAccess(r.user.login))) continue;
-              validApprovers.push(login);
-            }
+          # 2) Kdo do PR přispěl commitem? (author i committer)
+          commits = get_all_pages(f"/pulls/{pr['number']}/commits")
 
-            const ok = validApprovers.length >= REQUIRED_HUMAN_APPROVALS;
-            core.info(`Bot PR #${pr.number}: valid approvals = ${validApprovers.join(', ') || 'none'}`);
+          contributors = set()
+          for c in commits:
+              if (c.get("author") or {}).get("login"):
+                  contributors.add(c["author"]["login"].lower())
+              # web-flow = GitHub UI merge/edit committer, ignorujeme
+              committer_login = (c.get("committer") or {}).get("login")
+              if committer_login and committer_login != "web-flow":
+                  contributors.add(committer_login.lower())
 
-            await setStatus(
-              ok ? 'success' : 'pending',
-              ok
-                ? `OK: ${validApprovers.length} nezávislá lidská schválení.`
-                : `Bot PR: potřeba ${REQUIRED_HUMAN_APPROVALS} schválení od ne-committerů s write přístupem (má ${validApprovers.length}).`
-            );
+          # 2b) Všechny commity musí mít ověřený podpis. Nepodepsaný commit
+          #     může mít podvržený author e-mail, a tím obejít detekci
+          #     committerů (schvalovatel by si schválil vlastní commit).
+          unverified = [c for c in commits
+                        if not c["commit"].get("verification", {}).get("verified")]
+          if unverified:
+              set_status(
+                  "failure",
+                  f"Bot PR: {len(unverified)} commit(ů) bez ověřeného podpisu "
+                  "– autory nelze spolehlivě určit.",
+              )
+              sys.exit(0)
+
+          # 3) Poslední review od každého uživatele
+          latest_by_user = {}
+          for review in get_all_pages(f"/pulls/{pr['number']}/reviews"):
+              user = review.get("user")
+              if not user or user["type"] == "Bot":
+                  continue
+              if review["state"] == "COMMENTED":
+                  continue  # komentář nemění stav approvalu
+              latest_by_user[user["login"].lower()] = review
+
+          # 4) Platné approvals: stav APPROVED, na aktuálním head SHA,
+          #    od někoho, kdo do PR nepřispěl commitem a má write/admin
+          #    přístup. Bez kontroly oprávnění by na veřejném repu stačily
+          #    dva jednorázové účty – review může odeslat kdokoli.
+          #    (Legacy pole `permission` mapuje maintain->write, triage->read,
+          #    takže test na admin/write pokrývá i maintain.)
+          def has_write_access(username):
+              r = session.get(f"{API}/repos/{REPO}/collaborators/{username}/permission")
+              if r.status_code != 200:
+                  return False  # 404 => není kolaborátor
+              return r.json()["permission"] in ("admin", "write")
+
+          valid_approvers = [
+              login
+              for login, review in latest_by_user.items()
+              if review["state"] == "APPROVED"
+              and review["commit_id"] == head_sha      # approval starší verze neplatí
+              and login not in contributors            # committer si neschvaluje
+              and has_write_access(review["user"]["login"])
+          ]
+
+          ok = len(valid_approvers) >= REQUIRED_HUMAN_APPROVALS
+          print(f"Bot PR #{pr['number']}: valid approvals = {', '.join(valid_approvers) or 'none'}")
+
+          set_status(
+              "success" if ok else "pending",
+              f"OK: {len(valid_approvers)} nezávislá lidská schválení."
+              if ok else
+              f"Bot PR: potřeba {REQUIRED_HUMAN_APPROVALS} schválení od "
+              f"ne-committerů s write přístupem (má {len(valid_approvers)}).",
+          )
