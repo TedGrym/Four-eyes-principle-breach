@@ -50,4 +50,4 @@ The intentionally outdated `lodash` pin in [`package.json`](package.json) plus [
 
 - On PRs **from forks**, `pull_request_review` runs get a read-only token and cannot update the status. This fails closed — the status stays `pending` and the PR cannot merge — but it also means approvals on fork PRs only take effect on the next `pull_request_target` event: a push, reopen, ready-for-review, or adding a label (the `labeled` trigger exists exactly for this manual nudge).
 - Machine-user accounts (regular accounts used as bots) are not auto-detected — add their logins to `MACHINE_USER_BOTS` in the workflow.
-- Any workflow in this repo running with `statuses: write` could set the same status context; for maximum robustness publish the status from a GitHub App with its own token instead of `GITHUB_TOKEN`. That would also solve the fork-PR limitation above, making the setup suitable for fully open-source repos.
+- Any workflow in this repo running with `statuses: write` could set the same status context; for maximum robustness publish the status from a GitHub App with its own token instead of `GITHUB_TOKEN`. That would 
