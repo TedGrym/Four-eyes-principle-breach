@@ -40,7 +40,7 @@ The workflow is only half of the mechanism — without these settings the demo d
 | 7 | A user **without write access** approves | their approval is **not** counted |
 | 8 | Bot PR contains an unverified (unsigned) commit | `failure` |
 
-The intentionally outdated `lodash` pin in [`package.json`](package.json) plus [`.github/dependabot.yml`](.github/dependabot.yml) generate real bot PRs to test with; [`src/index.js`](src/index.js) gives bot PRs actual code to modify.
+The intentionally outdated `lodash` pin in [`package.json`](package.json) plus [`.github/dependabot.yml`](.github/dependabot.yml) generate real bot PRs to test with — authored by `dependabot[bot]` with signed commits, they exercise the full bot path of the workflow. The workflow itself is content-agnostic (it only looks at the PR author, committers and reviews), so no demo source code is needed.
 
 ## Known limitations
 
